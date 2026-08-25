@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     session = AgentSession(agent, max_messages=args.max_history)
-    print("Agent ready. Type a question, /history, /clear, or /quit (Ctrl-D to exit).")
+    print("Agent ready. Type a question, /history, /back, /clear, or /quit (Ctrl-D to exit).")
     run_repl(session)
     return 0
 
@@ -75,6 +75,10 @@ def run_repl(session: AgentSession) -> None:
             continue
         if query == "/history":
             _print_history(session.history)
+            continue
+        if query == "/back":
+            removed = session.back()
+            print(f"{removed} messages removed")
             continue
         try:
             print(session.run(query))

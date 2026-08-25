@@ -93,6 +93,30 @@ def test_session_retains_tool_result_for_later_turn() -> None:
     assert isinstance(second_turn_input[3], ToolMessage)
 
 
+def test_session_back_removes_last_turn() -> None:
+    llm = ScriptedChatModel(
+        replies=[
+            AIMessage(content="", tool_calls=[_tool_call("add", {"a": 2, "b": 3}, "call_1")]),
+            AIMessage(content="5"),
+            AIMessage(content="hi"),
+        ]
+    )
+    session = AgentSession(AgentLoop(llm, [add]))
+    session.run("What is 2 + 3?")
+    session.run("hi")
+
+    assert session.back() == 2
+    assert [message.content for message in session.history] == ["What is 2 + 3?", "", "5", "5"]
+
+
+def test_session_back_returns_zero_when_no_user_message() -> None:
+    llm = ScriptedChatModel(replies=[])
+    session = AgentSession(AgentLoop(llm, [add]))
+
+    assert session.back() == 0
+    assert session.history == ()
+
+
 def test_session_clear_discards_history() -> None:
     llm = ScriptedChatModel(replies=[AIMessage(content="first"), AIMessage(content="second")])
     session = AgentSession(AgentLoop(llm, [add]))

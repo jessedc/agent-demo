@@ -151,6 +151,23 @@ class AgentSession:
         """Discard all retained conversation messages."""
         self._messages.clear()
 
+    def back(self) -> int:
+        """Remove the last complete turn and return how many messages were dropped.
+
+        A turn is the last user message together with every message that followed
+        it (the assistant's tool calls, tool observations, and final answer). If
+        no user message has been sent yet, nothing is removed and zero is returned.
+        """
+        last_human = -1
+        for index, message in enumerate(self._messages):
+            if isinstance(message, HumanMessage):
+                last_human = index
+        if last_human == -1:
+            return 0
+        removed = len(self._messages) - last_human
+        del self._messages[last_human:]
+        return removed
+
     def _trim_history(self) -> None:
         """Drop oldest complete turns until history fits the configured limit."""
         if self.max_messages is None:

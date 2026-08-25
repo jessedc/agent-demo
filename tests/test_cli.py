@@ -29,6 +29,39 @@ def test_repl_history_and_clear_commands(monkeypatch, capsys) -> None:  # type: 
     assert "(history is empty)" in output
 
 
+def test_repl_back_removes_last_turn(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    llm = ScriptedChatModel(
+        replies=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "add", "args": {"a": 2, "b": 3}, "id": "call_1"}],
+            ),
+            AIMessage(content="5"),
+            AIMessage(content="hi"),
+        ]
+    )
+    monkeypatch.setattr(cli, "build_llm", lambda: llm)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("What is 2 + 3?\n/back\n/history\n"))
+
+    assert cli.main([]) == 0
+
+    output = capsys.readouterr().out
+    assert "5" in output
+    assert "4 messages removed" in output
+    assert "(history is empty)" in output
+
+
+def test_repl_back_with_no_history(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    llm = ScriptedChatModel(replies=[AIMessage(content="hi")])
+    monkeypatch.setattr(cli, "build_llm", lambda: llm)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("/back\n"))
+
+    assert cli.main([]) == 0
+
+    output = capsys.readouterr().out
+    assert "0 messages removed" in output
+
+
 def test_repl_quit_command_exits_loop(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     llm = ScriptedChatModel(
         replies=[AIMessage(content="before-quit"), AIMessage(content="after-quit")]
