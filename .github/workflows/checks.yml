@@ -1,0 +1,33 @@
+# Runs the project validation gate (scripts/check.sh) on every pull request:
+# ruff format --check, ruff check, pytest, mypy, pyright.
+name: checks
+
+on:
+  pull_request:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: check.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # Installs the Python pinned in .python-version.
+      - name: Install Python
+        run: uv python install
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Run the gate
+        run: ./scripts/check.sh
