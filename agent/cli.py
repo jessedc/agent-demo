@@ -43,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_history < 1:
         parser.error("--max-history must be positive")
 
+    if args.query == "ping":
+        print("pong")
+        return 0
+
     agent = AgentLoop(
         build_llm(), DEFAULT_TOOLS, max_iterations=args.max_iterations, verbose=args.verbose
     )

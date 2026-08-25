@@ -29,6 +29,21 @@ def test_repl_history_and_clear_commands(monkeypatch, capsys) -> None:  # type: 
     assert "(history is empty)" in output
 
 
+def test_ping_prints_pong_without_starting_agent(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    """A query of "ping" prints "pong" without building or running the agent."""
+
+    def fail(*args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        raise AssertionError("the agent must not be built for a 'ping' query")
+
+    monkeypatch.setattr(cli, "build_llm", fail)
+    monkeypatch.setattr(cli, "AgentLoop", fail)
+
+    assert cli.main(["ping"]) == 0
+
+    output = capsys.readouterr().out
+    assert output == "pong\n"
+
+
 def test_repl_quit_command_exits_loop(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     llm = ScriptedChatModel(
         replies=[AIMessage(content="before-quit"), AIMessage(content="after-quit")]
