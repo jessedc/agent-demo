@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.14"
 # dependencies = [
-#     "laya>=0.3.22",
+#     "laya[serve]>=0.3.22",
 #     "torch>=2.14",
 # ]
 #
@@ -17,28 +17,32 @@
 #     { index = "pytorch-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 # ]
 # ///
-"""Run the Laya decision model (huggingface.co/convaiinnovations/laya) on an NVIDIA GB10.
+"""Serve the Laya decision model (huggingface.co/convaiinnovations/laya) on an NVIDIA GB10.
+
+Runs laya's own HTTP server (`POST /v1/systemone`, `GET /health`) with a single checkpoint
+pinned: every request is answered by it, whatever language it is in or `model` it names,
+so no other checkpoint is ever downloaded or loaded.
 
 Self-contained: `uv run` builds an isolated environment from the inline metadata above,
 separate from the `agent` project, so torch/transformers never touch the project lockfile.
 
-    uv run scripts/run_laya.py                        # demo ticket, routed checkpoint
-    uv run scripts/run_laya.py --state "text" --model multilingual
-    uv run scripts/run_laya.py --state-file ticket.json --questions-file q.json
-    uv run scripts/run_laya.py --bench 50             # latency benchmark after warmup
+    uv run scripts/run_laya.py                        # English only, 127.0.0.1:8000
+    uv run scripts/run_laya.py --host 0.0.0.0         # reachable from other machines
+    uv run scripts/run_laya.py --model multilingual   # pin a different checkpoint
+    uv run scripts/run_laya.py --model auto           # laya's language routing
 
-Checkpoints download to the Hugging Face cache (~/.cache/huggingface) on first use.
+Set LAYA_API_KEY in the environment to require `Authorization: Bearer <key>`; without it
+the server accepts any request that can reach it. Checkpoints download to the Hugging Face
+cache (~/.cache/huggingface) on first run.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import statistics
 import sys
 import time
-from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 # transformers probes for TensorFlow at import; if TF is installed that can deadlock
@@ -47,68 +51,49 @@ os.environ.setdefault("USE_TF", "0")
 
 import torch  # noqa: E402
 from laya import Router  # noqa: E402
+from laya import serve as laya_serve  # noqa: E402
 
-DEMO_STATE: dict[str, str] = {
-    "from": "user@acme.com",
-    "subject": "Duplicate charge on invoice #4411",
-    "body": (
-        "Hi, we were billed twice for March. Please refund the duplicate today "
-        "or we will cancel our plan."
-    ),
-}
+CHECKPOINTS = ["english", "multilingual", "typed-decisions"]
 
-DEMO_QUESTIONS: dict[str, Any] = {
-    "department": {
-        "type": "choice",
-        "instructions": "Which department should handle this request?",
-        "criteria": {
-            "billing": "invoices, payments, refunds",
-            "technical": "bugs, outages, system errors",
-            "sales": "pricing, new contracts",
-            "other": "everything else",
-        },
-    },
-    "urgency": {
-        "type": "score",
-        "instructions": "How urgent is this request?",
-        "criteria": ["not urgent", "soon", "critical deadline or blocking issue"],
-    },
-    "churn_risk": {
-        "type": "noul",
-        "instructions": "Does the user threaten to cancel or leave?",
-    },
-}
+
+class PinnedRouter(Router):  # type: ignore[misc]
+    """A Router that answers every request with one checkpoint.
+
+    laya-serve passes each request's `model` field through to `predict` and
+    `predict_batch`; overriding it here is what keeps a non-English request from
+    loading the multilingual checkpoint.
+    """
+
+    def __init__(self, pinned: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.pinned = pinned
+
+    def predict(
+        self, state: Any, questions: dict[str, Any], model: str | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = super().predict(state, questions, model=self.pinned, **kwargs)
+        return result
+
+    def predict_batch(
+        self, requests: Sequence[dict[str, Any]], *args: Any, **kwargs: Any
+    ) -> list[dict[str, Any]]:
+        pinned = [{**r, "model": self.pinned} for r in requests]
+        results: list[dict[str, Any]] = super().predict_batch(pinned, *args, **kwargs)
+        return results
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    src = p.add_mutually_exclusive_group()
-    src.add_argument("--state", help="state text to evaluate (default: demo ticket)")
-    src.add_argument("--state-file", type=Path, help="JSON or text file holding the state")
-    p.add_argument("--questions-file", type=Path, help="JSON file of typed questions")
     p.add_argument(
         "--model",
-        choices=["english", "multilingual", "typed-decisions"],
-        help="force a checkpoint instead of automatic language routing",
+        choices=[*CHECKPOINTS, "auto"],
+        default="english",
+        help="checkpoint to serve (default: english); 'auto' keeps laya's language routing",
     )
-    p.add_argument("--max-len", type=int, help="token budget override (multilingual: up to 8192)")
+    p.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8000, help="bind port (default: 8000)")
     p.add_argument("--device", default="cuda", help="torch device (default: cuda)")
-    p.add_argument("--preload", action="store_true", help="load all three checkpoints up front")
-    p.add_argument("--bench", type=int, default=0, metavar="N", help="time N predictions")
     return p.parse_args()
-
-
-def load_state(args: argparse.Namespace) -> str | dict[str, Any] | list[Any]:
-    if args.state is not None:
-        return str(args.state)
-    if args.state_file is not None:
-        text = args.state_file.read_text()
-        try:
-            loaded: str | dict[str, Any] | list[Any] = json.loads(text)
-        except json.JSONDecodeError:
-            return text
-        return loaded
-    return DEMO_STATE
 
 
 def check_device(device: str) -> None:
@@ -138,43 +123,36 @@ def check_device(device: str) -> None:
         )
 
 
+def build_router(model: str, device: str) -> Router:
+    """Load the served checkpoint(s) and run one warmup prediction."""
+    t0 = time.perf_counter()
+    router: Router
+    if model == "auto":
+        router = Router(device=device)
+        router.preload(["english", "multilingual"])
+    else:
+        router = PinnedRouter(model, device=device, max_loaded=1)
+        router.preload([model])
+    warmup = {"ok": {"type": "noul", "instructions": "Is this a test?"}}
+    router.predict("warmup", warmup)
+    print(f"loaded {model} in {time.perf_counter() - t0:.1f}s", file=sys.stderr)
+    return router
+
+
 def main() -> None:
     args = parse_args()
     check_device(args.device)
+    router = build_router(args.model, args.device)
 
-    state = load_state(args)
-    questions: dict[str, Any] = (
-        json.loads(args.questions_file.read_text()) if args.questions_file else DEMO_QUESTIONS
-    )
-
-    t0 = time.perf_counter()
-    router = Router(device=args.device, preload=args.preload)
-    if not args.preload:
-        # Load the checkpoint now so the first timed prediction excludes download/build.
-        router.predict(state, questions, model=args.model, max_len=args.max_len)
-    print(f"loaded in {time.perf_counter() - t0:.1f}s", file=sys.stderr)
-
-    result = router.predict(state, questions, model=args.model, max_len=args.max_len)
-    print(json.dumps(result, indent=2, default=str))
-
-    if args.bench > 0:
-        timings: list[float] = []
-        for _ in range(args.bench):
-            if args.device.startswith("cuda"):
-                torch.cuda.synchronize()
-            start = time.perf_counter()
-            router.predict(state, questions, model=args.model, max_len=args.max_len)
-            if args.device.startswith("cuda"):
-                torch.cuda.synchronize()
-            timings.append((time.perf_counter() - start) * 1000)
-        timings.sort()
-        p95 = timings[max(0, int(len(timings) * 0.95) - 1)]
-        print(
-            f"bench: {args.bench} runs, {len(questions)} questions/call  "
-            f"p50 {statistics.median(timings):.1f} ms  p95 {p95:.1f} ms  "
-            f"min {timings[0]:.1f} ms",
-            file=sys.stderr,
-        )
+    # laya-serve reads its bind address from the environment and builds its own Router;
+    # hand it ours instead so the pinned checkpoint is the only one it can use.
+    os.environ["LAYA_HOST"] = args.host
+    os.environ["LAYA_PORT"] = str(args.port)
+    laya_serve.build_router = lambda: router
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("LAYA_API_KEY"):
+        print(f"warning: listening on {args.host} with no LAYA_API_KEY set", file=sys.stderr)
+    print(f"serving on http://{args.host}:{args.port}/v1/systemone", file=sys.stderr)
+    laya_serve.main()
 
 
 if __name__ == "__main__":
